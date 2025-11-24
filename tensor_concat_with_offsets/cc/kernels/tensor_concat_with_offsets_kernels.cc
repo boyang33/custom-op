@@ -13,15 +13,187 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#if GOOGLE_CUDA
+#define EIGEN_USE_GPU
+#endif  // GOOGLE_CUDA
+
 #include "tensor_concat_with_offsets.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/ops_util.h"
 
+#include <chrono>
+#include <cstdlib>
+#include <string>
+#include <algorithm>
+#include <climits>
+
 namespace tensorflow {
 namespace functor {
 
+typedef Eigen::GpuDevice GPUDevice;
 typedef Eigen::ThreadPoolDevice CPUDevice;
+
+/**
+ * 性能诊断工具
+ */
+namespace perf_diagnostics {
+
+// 环境变量控制开关
+// 注意：每次都读取环境变量，支持运行时动态修改
+static bool IsDebugEnabled() {
+  const char* env = std::getenv("TF_CONCAT_DEBUG");
+  return env != nullptr && std::string(env) == "1";
+}
+
+// 计时器
+class Timer {
+ public:
+  Timer() : start_(std::chrono::high_resolution_clock::now()) {}
+  
+  double ElapsedMicros() const {
+    auto end = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+  }
+  
+  double ElapsedMillis() const {
+    return ElapsedMicros() / 1000.0;
+  }
+  
+ private:
+  std::chrono::high_resolution_clock::time_point start_;
+};
+
+// 统计信息收集器
+struct ConcatStats {
+  int num_inputs = 0;
+  int64_t total_elements = 0;
+  int64_t total_bytes = 0;
+  int64_t min_chunk_size = INT64_MAX;
+  int64_t max_chunk_size = 0;
+  int64_t avg_chunk_size = 0;
+  int small_chunks = 0;   // < 1KB
+  int medium_chunks = 0;  // 1KB - 64KB
+  int large_chunks = 0;   // > 64KB
+  int empty_chunks = 0;
+  
+  double validation_time_ms = 0;
+  double offset_calc_time_ms = 0;
+  double alloc_output_time_ms = 0;
+  double alloc_offsets_time_ms = 0;
+  double copy_time_ms = 0;
+  double total_time_ms = 0;
+  
+  void AnalyzeChunkSizes(const std::vector<int64_t>& chunk_sizes, size_t element_size) {
+    for (int64_t size : chunk_sizes) {
+      int64_t bytes = size * element_size;
+      
+      if (size == 0) {
+        empty_chunks++;
+      } else if (bytes < 1024) {
+        small_chunks++;
+      } else if (bytes < 65536) {
+        medium_chunks++;
+      } else {
+        large_chunks++;
+      }
+      
+      if (size > 0) {
+        min_chunk_size = std::min(min_chunk_size, size);
+        max_chunk_size = std::max(max_chunk_size, size);
+      }
+    }
+    
+    if (num_inputs > empty_chunks) {
+      avg_chunk_size = total_elements / (num_inputs - empty_chunks);
+    }
+  }
+  
+  void Print() const {
+    LOG(INFO) << "===== TensorConcatWithOffsets Performance Diagnostics =====";
+    LOG(INFO) << "Input Configuration:";
+    LOG(INFO) << "  - Num inputs: " << num_inputs;
+    LOG(INFO) << "  - Total elements: " << total_elements;
+    LOG(INFO) << "  - Total bytes: " << total_bytes << " (" 
+              << (total_bytes / 1024.0 / 1024.0) << " MB)";
+    LOG(INFO) << "  - Empty chunks: " << empty_chunks;
+    
+    LOG(INFO) << "Chunk Size Distribution:";
+    LOG(INFO) << "  - Small chunks (<1KB): " << small_chunks;
+    LOG(INFO) << "  - Medium chunks (1-64KB): " << medium_chunks;
+    LOG(INFO) << "  - Large chunks (>64KB): " << large_chunks;
+    LOG(INFO) << "  - Min chunk size: " << min_chunk_size << " elements";
+    LOG(INFO) << "  - Max chunk size: " << max_chunk_size << " elements";
+    LOG(INFO) << "  - Avg chunk size: " << avg_chunk_size << " elements";
+    
+    LOG(INFO) << "Timing Breakdown:";
+    LOG(INFO) << "  - Validation: " << validation_time_ms << " ms ("
+              << (validation_time_ms / total_time_ms * 100) << "%)";
+    LOG(INFO) << "  - Offset calculation: " << offset_calc_time_ms << " ms ("
+              << (offset_calc_time_ms / total_time_ms * 100) << "%)";
+    LOG(INFO) << "  - Offsets allocation: " << alloc_offsets_time_ms << " ms ("
+              << (alloc_offsets_time_ms / total_time_ms * 100) << "%)";
+    LOG(INFO) << "  - Output allocation: " << alloc_output_time_ms << " ms ("
+              << (alloc_output_time_ms / total_time_ms * 100) << "%)";
+    LOG(INFO) << "  - Data copy: " << copy_time_ms << " ms ("
+              << (copy_time_ms / total_time_ms * 100) << "%)";
+    LOG(INFO) << "  - TOTAL: " << total_time_ms << " ms";
+    
+    LOG(INFO) << "Performance Metrics:";
+    if (copy_time_ms > 0) {
+      double bandwidth_gbps = (total_bytes / 1024.0 / 1024.0 / 1024.0) / 
+                              (copy_time_ms / 1000.0);
+      LOG(INFO) << "  - Copy bandwidth: " << bandwidth_gbps << " GB/s";
+      LOG(INFO) << "  - Avg copy time per chunk: " 
+                << (copy_time_ms / num_inputs) << " ms";
+    }
+    
+    LOG(INFO) << "Optimization Recommendations:";
+    
+    // 推荐1: 内存分配优化
+    if (alloc_output_time_ms > total_time_ms * 0.3) {
+      LOG(WARNING) << "  ⚠ Memory allocation takes " 
+                   << (alloc_output_time_ms / total_time_ms * 100) 
+                   << "% of total time!";
+      LOG(WARNING) << "    → Consider: Tensor pooling / pre-allocation";
+      LOG(WARNING) << "    → Consider: Reduce allocation frequency";
+    }
+    
+    // 推荐2: 小块批量优化
+    if (small_chunks > num_inputs * 0.5 && num_inputs > 10) {
+      LOG(WARNING) << "  ⚠ High ratio of small chunks (" << small_chunks 
+                   << "/" << num_inputs << ")";
+      LOG(WARNING) << "    → Consider: Batch memcpy for small chunks";
+      LOG(WARNING) << "    → Consider: Buffer pooling strategy";
+    }
+    
+    // 推荐3: 大块使用GPU
+    if (large_chunks > 5 && total_bytes > 10 * 1024 * 1024) {
+      LOG(WARNING) << "  ⚠ Large data volume (" 
+                   << (total_bytes / 1024.0 / 1024.0) << " MB) with " 
+                   << large_chunks << " large chunks";
+      LOG(WARNING) << "    → Consider: GPU acceleration";
+    }
+    
+    // 推荐4: 异步执行
+    if (total_time_ms > 10.0) {
+      LOG(WARNING) << "  ⚠ Total execution time > 10ms";
+      LOG(WARNING) << "    → Consider: Async execution";
+      LOG(WARNING) << "    → Consider: Pipeline parallelism";
+    }
+    
+    // 推荐5: 空块过滤
+    if (empty_chunks > num_inputs * 0.2) {
+      LOG(WARNING) << "  ⚠ High ratio of empty chunks (" << empty_chunks 
+                   << "/" << num_inputs << ")";
+      LOG(WARNING) << "    → Consider: Pre-filter empty inputs";
+    }
+    
+    LOG(INFO) << "========================================================";
+  }
+};
+
+}  // namespace perf_diagnostics
 
 /**
  * 内存对齐工具函数
@@ -104,7 +276,18 @@ class TensorConcatWithOffsetsOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override {
-    // 收集输入信息并验证
+    using namespace perf_diagnostics;
+    
+    // 全局计时
+    Timer total_timer;
+    const bool debug_enabled = IsDebugEnabled();
+    
+    // 统计信息
+    ConcatStats stats;
+    stats.num_inputs = num_inputs_;
+    
+    // 阶段1: 收集输入信息并验证
+    Timer validation_timer;
     std::vector<const T*> input_data_ptrs(num_inputs_);
     std::vector<int64_t> input_lengths(num_inputs_);
 
@@ -123,6 +306,8 @@ class TensorConcatWithOffsetsOp : public OpKernel {
 
     // 收集所有输入并验证形状
     int64_t total_original_elements = 0;
+    std::vector<int64_t> chunk_elements;  // 用于统计
+    
     for (int i = 0; i < num_inputs_; ++i) {
       const Tensor& input_tensor = context->input(i);
       const TensorShape& current_shape = input_tensor.shape();
@@ -145,19 +330,27 @@ class TensorConcatWithOffsetsOp : public OpKernel {
       input_lengths[i] = length;
       input_data_ptrs[i] = length > 0 ? input_tensor.flat<T>().data() : nullptr;
       total_original_elements += length;
+      
+      chunk_elements.push_back(length * row_size);
     }
+    
+    stats.validation_time_ms = validation_timer.ElapsedMillis();
 
-    // 分配offsets tensor并预计算offsets
+    // 阶段2: 分配offsets tensor并预计算offsets
+    Timer offset_alloc_timer;
     TensorShape offsets_shape({num_inputs_, 2});
     Tensor* offsets_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(1, offsets_shape, &offsets_tensor));
+    stats.alloc_offsets_time_ms = offset_alloc_timer.ElapsedMillis();
+    
     // TensorFlow的int64类型需要转换为int64_t
     int64_t* offsets_data = reinterpret_cast<int64_t*>(offsets_tensor->flat<int64>().data());
 
+    // 阶段3: 预计算offsets
+    Timer offset_calc_timer;
     const int64_t element_size = sizeof(T);
     int64_t current_offset = 0;
 
-    // 预计算所有offsets和总大小
     for (int i = 0; i < num_inputs_; ++i) {
       int64_t actual_offset = current_offset;
 
@@ -172,23 +365,55 @@ class TensorConcatWithOffsetsOp : public OpKernel {
     }
 
     const int64_t total_elements = current_offset;
+    stats.total_elements = total_elements * row_size;
+    stats.total_bytes = stats.total_elements * element_size;
+    stats.offset_calc_time_ms = offset_calc_timer.ElapsedMillis();
 
-    // 分配合并后的输出tensor
+    // 阶段4: 分配合并后的输出tensor
+    Timer alloc_output_timer;
     TensorShape merged_shape = reference_shape;
     merged_shape.set_dim(0, total_elements);
     Tensor* merged_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(0, merged_shape, &merged_tensor));
+    stats.alloc_output_time_ms = alloc_output_timer.ElapsedMillis();
+    
+    if (debug_enabled && stats.alloc_output_time_ms > 1.0) {
+      LOG(WARNING) << "TensorConcat: Large allocation time detected: " 
+                   << stats.alloc_output_time_ms << " ms for " 
+                   << (stats.total_bytes / 1024.0 / 1024.0) << " MB";
+    }
 
     // 如果没有数据需要复制，直接返回
     if (total_elements == 0) {
+      if (debug_enabled) {
+        LOG(INFO) << "TensorConcat: Empty output, skipping copy";
+      }
       return;
     }
 
-    // 执行数据复制
+    // 阶段5: 执行数据复制
+    Timer copy_timer;
     T* output_data = merged_tensor->flat<T>().data();
     TensorConcatWithOffsetsFunctor<Device, T> functor;
     functor(context->eigen_device<Device>(), input_data_ptrs, offsets_data, num_inputs_, row_size,
             output_data);
+    stats.copy_time_ms = copy_timer.ElapsedMillis();
+    
+    // 记录总时间
+    stats.total_time_ms = total_timer.ElapsedMillis();
+    
+    // 分析和输出诊断信息
+    if (debug_enabled) {
+      stats.AnalyzeChunkSizes(chunk_elements, element_size);
+      stats.Print();
+      
+      // 如果发现性能问题，输出额外警告
+      if (stats.total_time_ms > 5.0) {
+        LOG(ERROR) << "TensorConcat: Performance issue detected! Total time: " 
+                   << stats.total_time_ms << " ms";
+        LOG(ERROR) << "  Please check the diagnostics above for optimization recommendations.";
+      }
+    }
   }
 
  private:
@@ -209,6 +434,23 @@ REGISTER_CPU_KERNEL(int32);
 REGISTER_CPU_KERNEL(int64);
 
 #undef REGISTER_CPU_KERNEL
+
+// GPU 注册
+#if GOOGLE_CUDA
+#define REGISTER_GPU_KERNEL(type)                        \
+  REGISTER_KERNEL_BUILDER(Name("TensorConcatWithOffsets") \
+                              .Device(DEVICE_GPU)        \
+                              .TypeConstraint<type>("T") \
+                              .HostMemory("offsets"),    \
+                          TensorConcatWithOffsetsOp<GPUDevice, type>)
+
+REGISTER_GPU_KERNEL(float);
+REGISTER_GPU_KERNEL(double);
+REGISTER_GPU_KERNEL(int32);
+REGISTER_GPU_KERNEL(int64);
+
+#undef REGISTER_GPU_KERNEL
+#endif  // GOOGLE_CUDA
 
 }  // namespace functor
 }  // namespace tensorflow
