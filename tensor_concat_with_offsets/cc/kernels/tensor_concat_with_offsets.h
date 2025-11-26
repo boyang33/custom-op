@@ -16,11 +16,13 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_TENSOR_CONCAT_WITH_OFFSETS_H_
 #define TENSORFLOW_CORE_KERNELS_TENSOR_CONCAT_WITH_OFFSETS_H_
 
-#include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 
 namespace tensorflow {
+
+// 前向声明
+class OpKernelContext;
+
 namespace functor {
 
 // ============================================================================
@@ -32,6 +34,15 @@ namespace tensor_concat_with_offsets_config {
 // GPU硬件配置
 constexpr int32 kBlockSize = 256;      // 每个block的线程数
 constexpr int64_t kMaxBlocks = 65535;  // GPU硬件限制的最大block数
+
+// GPU多流优化配置
+constexpr int kStreamThreshold = 8;  // 启用多流的最小输入数量
+constexpr int kNumStreams = 4;       // 使用的CUDA流数量
+
+// CPU并行化配置
+constexpr int64_t kDefaultParallelThreshold = 1024 * 1024;  // 默认并行阈值（元素数）
+constexpr int kDefaultMaxParallelism = 0;  // 默认最大并行度（0表示使用所有可用线程）
+constexpr int kMinInputsForParallel = 4;  // 启用并行的最小输入数量
 
 }  // namespace tensor_concat_with_offsets_config
 
@@ -47,22 +58,24 @@ constexpr int64_t kMaxBlocks = 65535;  // GPU硬件限制的最大block数
  * 算法特点：
  *   - 支持任意维度的tensor（≥1维）
  *   - 沿第0维进行合并，其他维度保持不变
- *   - CPU版本使用std::memcpy
- *   - GPU版本使用高效的并行kernel
+ *   - CPU版本使用std::memcpy（支持并行化）
+ *   - GPU版本使用高效的并行kernel（支持多流）
  */
 template <typename Device, typename T>
 struct TensorConcatWithOffsetsFunctor {
   /**
    * 执行tensor合并操作
    *
-   * @param d 计算设备句柄
+   * @param context Op上下文（CPU并行化使用，GPU忽略）
+   * @param d 计算设备句柄（GPU多流使用，CPU忽略）
    * @param input_data_ptrs 输入tensor的数据指针列表
    * @param offsets_data 预计算的offsets数据（[N, 2]，每行为[offset, length]）
    * @param num_inputs 输入tensor的数量
    * @param row_size 每行的元素数量（除第0维外所有维度的乘积）
    * @param output_data 输出tensor的数据指针
    */
-  void operator()(const Device& d,
+  void operator()(OpKernelContext* context,
+                  const Device& d,
                   const std::vector<const T*>& input_data_ptrs,
                   const int64_t* offsets_data,
                   int32 num_inputs,

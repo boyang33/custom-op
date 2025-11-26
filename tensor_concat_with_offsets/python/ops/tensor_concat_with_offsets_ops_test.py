@@ -140,6 +140,92 @@ class TensorConcatWithOffsetsTest(test.TestCase):
             self.assertEqual(concatenated_val.shape, (6, 2))  # 2 + 1 + 3 = 6 rows
 
 
+    @test_util.run_deprecated_v1
+    def testCPUParallelization(self):
+        """测试CPU并行化功能"""
+        import os
+        with self.cached_session():
+            # 创建足够大的数据以触发并行化
+            # 默认阈值是1MB (1024*1024个元素)
+            np.random.seed(100)
+            # 创建多个大tensor，总数超过阈值
+            num_inputs = 10
+            inputs = []
+            for i in range(num_inputs):
+                # 每个tensor: 150行 * 800列 = 120,000个元素
+                data = np.random.rand(150, 800).astype(np.float32)
+                inputs.append(constant_op.constant(data, dtype=dtypes.float32))
+            
+            # 在CPU设备上测试
+            with test.mock.patch.dict(os.environ, {'TF_CONCAT_PARALLEL_THRESHOLD': '1000000'}):
+                concatenated, offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                    inputs, use_alignment=False)
+                
+                # 验证结果
+                concatenated_val = concatenated.eval()
+                offsets_val = offsets.eval()
+                
+                # 验证形状
+                self.assertEqual(concatenated_val.shape, (1500, 800))  # 10 * 150 = 1500
+                self.assertEqual(offsets_val.shape, (10, 2))
+                
+                # 验证offsets正确性
+                expected_offset = 0
+                for i in range(num_inputs):
+                    self.assertEqual(offsets_val[i, 0], expected_offset)
+                    self.assertEqual(offsets_val[i, 1], 150)
+                    expected_offset += 150
+
+    @test_util.run_deprecated_v1
+    def testCPUParallelizationSmallData(self):
+        """测试CPU小数据不触发并行化"""
+        with self.cached_session():
+            # 创建小数据，不应触发并行化
+            inputs = [
+                constant_op.constant(np.random.rand(30, 50).astype(np.float32)),
+                constant_op.constant(np.random.rand(40, 50).astype(np.float32)),
+                constant_op.constant(np.random.rand(30, 50).astype(np.float32))
+            ]
+            
+            concatenated, offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                inputs, use_alignment=False)
+            
+            concatenated_val = concatenated.eval()
+            offsets_val = offsets.eval()
+            
+            # 验证结果正确性（无论是否并行化，结果应该一致）
+            self.assertEqual(concatenated_val.shape, (100, 50))  # 30 + 40 + 30 = 100
+            expected_offsets = [[0, 30], [30, 40], [70, 30]]
+            self.assertAllEqual(offsets_val, expected_offsets)
+
+    @test_util.run_deprecated_v1
+    def testParallelizationWithMixedSizes(self):
+        """测试混合大小输入的并行化"""
+        with self.cached_session():
+            # 创建包含大小不一的输入
+            np.random.seed(500)
+            inputs = [
+                constant_op.constant(np.random.rand(800, 400).astype(np.float32)),   # 大
+                constant_op.constant(np.random.rand(50, 400).astype(np.float32)),    # 小
+                constant_op.constant(np.random.rand(700, 400).astype(np.float32)),   # 大
+                constant_op.constant(np.random.rand(100, 400).astype(np.float32)),   # 小
+                constant_op.constant(np.random.rand(850, 400).astype(np.float32))    # 大
+            ]
+            
+            concatenated, offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                inputs, use_alignment=False)
+            
+            concatenated_val = concatenated.eval()
+            offsets_val = offsets.eval()
+            
+            # 验证形状
+            self.assertEqual(concatenated_val.shape, (2500, 400))  # 800+50+700+100+850=2500
+            
+            # 验证offsets
+            expected_offsets = [[0, 800], [800, 50], [850, 700], [1550, 100], [1650, 850]]
+            self.assertAllEqual(offsets_val, expected_offsets)
+
+
 class TensorConcatWithOffsetsGPUTest(test.TestCase):
     """GPU专用测试"""
 
@@ -239,6 +325,104 @@ class TensorConcatWithOffsetsGPUTest(test.TestCase):
                 [input1_dbl, input2_dbl], use_alignment=False)
             
             self.assertAllClose(concat_dbl.eval(), [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    @test_util.run_deprecated_v1
+    def testGPUMultiStream(self):
+        """测试GPU多流并发功能"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session(use_gpu=True):
+            # 创建大量输入（>8个以触发GPU多流）
+            np.random.seed(200)
+            # 创建10个输入tensor（超过8个以触发多流优化）
+            num_inputs = 10
+            inputs = []
+            for i in range(num_inputs):
+                data = np.random.rand(150, 512).astype(np.float32)
+                inputs.append(constant_op.constant(data, dtype=dtypes.float32))
+            
+            # 在GPU设备上测试
+            concatenated, offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                inputs, use_alignment=False)
+            
+            # 验证结果
+            concatenated_val = concatenated.eval()
+            offsets_val = offsets.eval()
+            
+            # 验证形状
+            self.assertEqual(concatenated_val.shape, (1500, 512))  # 10 * 150 = 1500
+            self.assertEqual(offsets_val.shape, (10, 2))
+            
+            # 验证offsets
+            expected_offset = 0
+            for i in range(num_inputs):
+                self.assertEqual(offsets_val[i, 0], expected_offset)
+                self.assertEqual(offsets_val[i, 1], 150)
+                expected_offset += 150
+
+    @test_util.run_deprecated_v1
+    def testGPUSingleStream(self):
+        """测试GPU单流情况（输入数量<=8）"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session(use_gpu=True):
+            # 创建数据，但输入数量少（<=8），不触发多流
+            np.random.seed(300)
+            num_inputs = 6
+            inputs = []
+            for i in range(num_inputs):
+                data = np.random.rand(100, 256).astype(np.float32)
+                inputs.append(constant_op.constant(data, dtype=dtypes.float32))
+            
+            concatenated, offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                inputs, use_alignment=False)
+            
+            concatenated_val = concatenated.eval()
+            offsets_val = offsets.eval()
+            
+            # 验证结果正确性
+            self.assertEqual(concatenated_val.shape, (600, 256))  # 6 * 100 = 600
+            
+            # 验证offsets
+            for i in range(num_inputs):
+                self.assertEqual(offsets_val[i, 0], i * 100)
+                self.assertEqual(offsets_val[i, 1], 100)
+
+    @test_util.run_deprecated_v1
+    def testCPUGPUConsistency(self):
+        """测试CPU和GPU结果的一致性"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session():
+            # 创建相同的测试数据
+            np.random.seed(400)
+            num_inputs = 5
+            inputs = []
+            for i in range(num_inputs):
+                data = np.random.rand(200, 400).astype(np.float32)
+                inputs.append(constant_op.constant(data, dtype=dtypes.float32))
+            
+            # CPU执行
+            with test.mock.patch.dict('os.environ', {'CUDA_VISIBLE_DEVICES': ''}):
+                cpu_concat, cpu_offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                    inputs, use_alignment=False)
+                cpu_concat_val = cpu_concat.eval()
+                cpu_offsets_val = cpu_offsets.eval()
+            
+            # GPU执行
+            gpu_concat, gpu_offsets = tensor_concat_with_offsets_ops.tensor_concat_with_offsets(
+                inputs, use_alignment=False)
+            gpu_concat_val = gpu_concat.eval()
+            gpu_offsets_val = gpu_offsets.eval()
+            
+            # 验证CPU和GPU结果一致
+            self.assertAllClose(cpu_concat_val, gpu_concat_val, rtol=1e-5, atol=1e-6,
+                              msg="CPU/GPU concatenated tensor inconsistency")
+            self.assertAllEqual(cpu_offsets_val, gpu_offsets_val,
+                              msg="CPU/GPU offsets inconsistency")
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ namespace functor {
 using GPUDevice = Eigen::GpuDevice;
 using tensor_concat_with_offsets_config::kBlockSize;
 using tensor_concat_with_offsets_config::kMaxBlocks;
+using tensor_concat_with_offsets_config::kStreamThreshold;
+using tensor_concat_with_offsets_config::kNumStreams;
 
 namespace {
 
@@ -69,9 +71,27 @@ __global__ void TensorConcatKernel(const T* __restrict__ input_data,
 
 }  // namespace
 
+/**
+ * GPU 设备特化：TensorConcatWithOffsets Functor 实现
+ *
+ * 策略：
+ *   1. 使用 CUDA kernel 并行复制每个输入 tensor
+ *   2. 大量输入（>8）时使用多 stream 优化，提升并发度
+ *   3. 少量输入时串行启动 kernel，避免 stream 创建开销
+ *
+ * 参数使用：
+ *   - context: 未使用（仅为统一接口）
+ *   - device: 使用，用于获取 CUDA stream
+ *
+ * 多 stream 优化：
+ *   - 阈值：num_inputs > kStreamThreshold（默认 8）
+ *   - 并行度：kNumStreams（默认 4 个 stream）
+ *   - 策略：轮流分配输入到不同 stream，最大化 GPU 利用率
+ */
 template <typename T>
 struct TensorConcatWithOffsetsFunctor<GPUDevice, T> {
-  void operator()(const GPUDevice& device,
+  void operator()(OpKernelContext* context,
+                  const GPUDevice& device,
                   const std::vector<const T*>& input_data_ptrs,
                   const int64_t* offsets_data,
                   int32 num_inputs,
@@ -82,35 +102,81 @@ struct TensorConcatWithOffsetsFunctor<GPUDevice, T> {
       return;
     }
 
-    // 处理每个输入tensor
-    for (int32 i = 0; i < num_inputs; ++i) {
-      const T* input_data = input_data_ptrs[i];
-      const int64_t offset = offsets_data[i * 2];
-      const int64_t length = offsets_data[i * 2 + 1];
-
-      // 跳过空tensor
-      if (length == 0 || input_data == nullptr) {
-        continue;
+    // 优化：对于大量输入，使用多stream并行启动kernel
+    if (num_inputs > kStreamThreshold) {
+      // 多stream并行模式
+      cudaStream_t streams[kNumStreams];
+      
+      // 创建streams（复用device的stream作为stream[0]）
+      streams[0] = device.stream();
+      for (int s = 1; s < kNumStreams; ++s) {
+        cudaStreamCreateWithFlags(&streams[s], cudaStreamNonBlocking);
       }
-
-      // 计算需要处理的总元素数
-      const int64_t total_elements = length * row_size;
-      const int64_t num_blocks = 
-          std::min(kMaxBlocks, (total_elements + kBlockSize - 1) / kBlockSize);
-
-      if (num_blocks <= 0) {
-        continue;
+      
+      // 并行启动kernels
+      for (int32 i = 0; i < num_inputs; ++i) {
+        const T* input_data = input_data_ptrs[i];
+        const int64_t offset = offsets_data[i * 2];
+        const int64_t length = offsets_data[i * 2 + 1];
+        
+        if (length == 0 || input_data == nullptr) {
+          continue;
+        }
+        
+        const int64_t total_elements = length * row_size;
+        const int64_t num_blocks = 
+            std::min(kMaxBlocks, (total_elements + kBlockSize - 1) / kBlockSize);
+        
+        if (num_blocks <= 0) {
+          continue;
+        }
+        
+        // 轮流使用不同的stream
+        int stream_id = i % kNumStreams;
+        TensorConcatKernel<T><<<num_blocks, kBlockSize, 0, streams[stream_id]>>>(
+            input_data, offset, length, row_size, output_data);
       }
-
-      // 启动GPU kernel
-      TensorConcatKernel<T><<<num_blocks, kBlockSize, 0, device.stream()>>>(
-          input_data, offset, length, row_size, output_data);
-
-      // 检查kernel启动错误
-      const cudaError_t kernel_error = cudaGetLastError();
-      if (kernel_error != cudaSuccess) {
-        LOG(ERROR) << "TensorConcatWithOffsets: TensorConcatKernel launch failed for input "
-                   << i << ": " << cudaGetErrorString(kernel_error);
+      
+      // 同步所有streams（除了stream[0]，它会被TF自动同步）
+      for (int s = 1; s < kNumStreams; ++s) {
+        cudaStreamSynchronize(streams[s]);
+        cudaStreamDestroy(streams[s]);
+      }
+      
+      // 检查错误（在同步后）
+      const cudaError_t sync_error = cudaGetLastError();
+      if (sync_error != cudaSuccess) {
+        LOG(ERROR) << "TensorConcatWithOffsets GPU: Kernel execution failed: "
+                   << cudaGetErrorString(sync_error);
+      }
+      
+    } else {
+      // 少量输入：使用原始串行模式（避免stream创建开销）
+      for (int32 i = 0; i < num_inputs; ++i) {
+        const T* input_data = input_data_ptrs[i];
+        const int64_t offset = offsets_data[i * 2];
+        const int64_t length = offsets_data[i * 2 + 1];
+        
+        if (length == 0 || input_data == nullptr) {
+          continue;
+        }
+        
+        const int64_t total_elements = length * row_size;
+        const int64_t num_blocks = 
+            std::min(kMaxBlocks, (total_elements + kBlockSize - 1) / kBlockSize);
+        
+        if (num_blocks <= 0) {
+          continue;
+        }
+        
+        TensorConcatKernel<T><<<num_blocks, kBlockSize, 0, device.stream()>>>(
+            input_data, offset, length, row_size, output_data);
+        
+        const cudaError_t kernel_error = cudaGetLastError();
+        if (kernel_error != cudaSuccess) {
+          LOG(ERROR) << "TensorConcatWithOffsets: TensorConcatKernel launch failed for input "
+                     << i << ": " << cudaGetErrorString(kernel_error);
+        }
       }
     }
   }

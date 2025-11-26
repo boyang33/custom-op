@@ -30,6 +30,7 @@ from tensor_split_by_offsets.python.ops import tensor_split_by_offsets_ops
 
 
 class TensorSplitByOffsetsTest(test.TestCase):
+    """CPU测试用例"""
 
     @test_util.run_deprecated_v1
     def testSplitByOffset1D(self):
@@ -39,8 +40,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             input_tensor = constant_op.constant([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=dtypes.int32)
             offsets = constant_op.constant([[0, 3], [3, 2], [5, 4]], dtype=dtypes.int64)
             
-            # 调用算子
-            with tf.device('/GPU:0'):
+            # 调用算子 - CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             # 验证结果
@@ -67,8 +68,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             
             offsets = constant_op.constant([[0, 2], [2, 1], [3, 3]], dtype=dtypes.int64)
             
-            # 调用算子 - 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # 调用算子 - CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             # 验证结果
@@ -95,8 +96,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             
             offsets = constant_op.constant([[0, 2], [2, 1], [3, 3]], dtype=dtypes.int64)
             
-            # 调用算子 - 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # 调用算子 - CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             # 验证结果
@@ -121,8 +122,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             
             offsets = constant_op.constant([[0, 2], [2, 1], [3, 3]], dtype=dtypes.int64)
             
-            # 调用算子 - 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # 调用算子 - CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             # 验证结果形状
@@ -145,8 +146,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             input_tensor = constant_op.constant([[1.1, 2.2], [3.3, 4.4], [5.5, 6.6]], dtype=dtypes.float32)
             offsets = constant_op.constant([[0, 2], [2, 1]], dtype=dtypes.int64)
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             expected_outputs = [
@@ -166,8 +167,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             input_tensor = constant_op.constant([[1, 2], [3, 4], [5, 6]], dtype=dtypes.int32)
             offsets = constant_op.constant([[0, 2], [2, 0], [2, 1]], dtype=dtypes.int64)  # 中间一个是空切片
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             expected_shapes = [(2, 2), (0, 2), (1, 2)]  # 第二个输出是空tensor
@@ -188,8 +189,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             input_tensor = constant_op.constant([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=dtypes.int32)
             offsets = constant_op.constant([[0, 3]], dtype=dtypes.int64)  # 只有一个输出
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             self.assertEqual(len(output_tensors), 1)
@@ -197,8 +198,6 @@ class TensorSplitByOffsetsTest(test.TestCase):
             expected_output = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
             
             self.assertAllEqual(expected_output, output_value)
-
-
 
     @test_util.run_deprecated_v1
     def testSplitByOffsetGradient(self):
@@ -208,8 +207,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             input_tensor = constant_op.constant([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=dtypes.float32)
             offsets = constant_op.constant([[0, 2], [2, 1]], dtype=dtypes.int64)
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
             
             # 对第一个输出计算梯度
@@ -240,8 +239,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
                 current_offset += length
             offsets = constant_op.constant(offsets_data, dtype=dtypes.int64)
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 split_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(merged_tensor, offsets)
             
             # 验证往返一致性
@@ -267,8 +266,8 @@ class TensorSplitByOffsetsTest(test.TestCase):
             # 计算offsets
             offsets = constant_op.constant([[0, 1], [1, 2]], dtype=dtypes.int64)
             
-            # 使用GPU测试修复的kernel
-            with tf.device('/GPU:0'):
+            # CPU设备
+            with tf.device('/CPU:0'):
                 split_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(merged_tensor, offsets)
             
             # 验证往返一致性
@@ -464,6 +463,295 @@ class TensorSplitByOffsetsTest(test.TestCase):
                                                             msg=f"Alignment {alignment}, tensor {i}: data mismatch")
                 except Exception as e:
                     self.fail(f"Failed with alignment={alignment}: {e}")
+
+    @test_util.run_deprecated_v1
+    def testCPUParallelization(self):
+        """测试CPU并行化功能"""
+        import os
+        with self.cached_session():
+            # 创建足够大的数据以触发并行化
+            # 默认阈值是1MB (1024*1024个元素)
+            np.random.seed(100)
+            # 创建大tensor: 2000行 * 600列 = 1,200,000个元素 > 1MB阈值
+            large_data = np.random.rand(2000, 600).astype(np.float32)
+            input_tensor = constant_op.constant(large_data)
+            
+            # 创建多个输出（>4个以触发并行化）
+            offsets = constant_op.constant([
+                [0, 400],      # 400 * 600 = 240,000个元素
+                [400, 300],    # 300 * 600 = 180,000个元素
+                [700, 500],    # 500 * 600 = 300,000个元素
+                [1200, 400],   # 400 * 600 = 240,000个元素
+                [1600, 400]    # 400 * 600 = 240,000个元素
+            ], dtype=dtypes.int64)
+            
+            # 在CPU设备上测试
+            with tf.device('/CPU:0'):
+                # 设置环境变量启用并行化（可选，默认已启用）
+                os.environ['TF_SPLIT_PARALLEL_THRESHOLD'] = '1000000'  # 1M个元素
+                
+                output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                
+                # 验证结果
+                output_values = [tensor.eval() for tensor in output_tensors]
+                
+                # 验证形状
+                expected_shapes = [(400, 600), (300, 600), (500, 600), (400, 600), (400, 600)]
+                for i, (expected_shape, actual_output) in enumerate(zip(expected_shapes, output_values)):
+                    self.assertEqual(expected_shape, actual_output.shape, 
+                                   msg=f"CPU parallel: tensor {i} shape mismatch")
+                
+                # 验证数据正确性
+                self.assertAllClose(large_data[0:400], output_values[0], rtol=1e-6)
+                self.assertAllClose(large_data[400:700], output_values[1], rtol=1e-6)
+                self.assertAllClose(large_data[700:1200], output_values[2], rtol=1e-6)
+                self.assertAllClose(large_data[1200:1600], output_values[3], rtol=1e-6)
+                self.assertAllClose(large_data[1600:2000], output_values[4], rtol=1e-6)
+
+    @test_util.run_deprecated_v1
+    def testCPUParallelizationSmallData(self):
+        """测试CPU小数据不触发并行化"""
+        with self.cached_session():
+            # 创建小数据，不应触发并行化
+            small_data = np.random.rand(100, 50).astype(np.float32)  # 只有5000个元素
+            input_tensor = constant_op.constant(small_data)
+            
+            offsets = constant_op.constant([
+                [0, 30],
+                [30, 40],
+                [70, 30]
+            ], dtype=dtypes.int64)
+            
+            with tf.device('/CPU:0'):
+                output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                
+                output_values = [tensor.eval() for tensor in output_tensors]
+                
+                # 验证结果正确性（无论是否并行化，结果应该一致）
+                self.assertAllClose(small_data[0:30], output_values[0], rtol=1e-6)
+                self.assertAllClose(small_data[30:70], output_values[1], rtol=1e-6)
+                self.assertAllClose(small_data[70:100], output_values[2], rtol=1e-6)
+
+
+class TensorSplitByOffsetsGPUTest(test.TestCase):
+    """GPU测试用例"""
+
+    @test_util.run_deprecated_v1
+    def testSplitByOffset1DGPU(self):
+        """测试GPU上1维tensor的拆分"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session(use_gpu=True):
+            # 创建输入tensor
+            input_tensor = constant_op.constant([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=dtypes.int32)
+            offsets = constant_op.constant([[0, 3], [3, 2], [5, 4]], dtype=dtypes.int64)
+            
+            # 调用算子 - GPU设备
+            output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
+            
+            # 验证结果
+            expected_outputs = [
+                [1, 2, 3],      # offset=0, length=3
+                [4, 5],         # offset=3, length=2
+                [6, 7, 8, 9]    # offset=5, length=4
+            ]
+            
+            output_values = [tensor.eval() for tensor in output_tensors]
+            for i, (expected, actual) in enumerate(zip(expected_outputs, output_values)):
+                self.assertAllEqual(expected, actual, msg=f"GPU: Output tensor {i} mismatch")
+
+    @test_util.run_deprecated_v1
+    def testSplitByOffset2DGPU(self):
+        """测试GPU上2维tensor的拆分"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session(use_gpu=True):
+            # 创建2维输入tensor
+            input_tensor = constant_op.constant([
+                [1, 2, 3], [4, 5, 6],
+                [7, 8, 9],
+                [10, 11, 12], [13, 14, 15], [16, 17, 18]
+            ], dtype=dtypes.int32)
+            
+            offsets = constant_op.constant([[0, 2], [2, 1], [3, 3]], dtype=dtypes.int64)
+            
+            output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(input_tensor, offsets)
+            
+            expected_outputs = [
+                [[1, 2, 3], [4, 5, 6]],
+                [[7, 8, 9]],
+                [[10, 11, 12], [13, 14, 15], [16, 17, 18]]
+            ]
+            
+            output_values = [tensor.eval() for tensor in output_tensors]
+            for i, (expected, actual) in enumerate(zip(expected_outputs, output_values)):
+                self.assertAllEqual(expected, actual, msg=f"GPU: Output tensor {i} mismatch")
+
+    @test_util.run_deprecated_v1
+    def testGPUMultiStream(self):
+        """测试GPU多流并发功能"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+            # 创建大数据和多个输出（>8个以触发GPU多流）
+            np.random.seed(200)
+            # 创建大tensor: 1500行 * 512列
+            large_data = np.random.rand(1500, 512).astype(np.float32)
+            input_tensor = constant_op.constant(large_data)
+            
+            # 创建10个输出（超过8个以触发多流优化）
+            offsets = constant_op.constant([
+                [0, 150],
+                [150, 150],
+                [300, 150],
+                [450, 150],
+                [600, 150],
+                [750, 150],
+                [900, 150],
+                [1050, 150],
+                [1200, 150],
+                [1350, 150]
+            ], dtype=dtypes.int64)
+            
+            # 在GPU设备上测试
+            with tf.device('/GPU:0'):
+                output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                
+                # 验证结果
+                output_values = [tensor.eval() for tensor in output_tensors]
+                
+                # 验证所有输出形状
+                expected_shape = (150, 512)
+                for i, actual_output in enumerate(output_values):
+                    self.assertEqual(expected_shape, actual_output.shape,
+                                   msg=f"GPU multi-stream: tensor {i} shape mismatch")
+                
+                # 验证数据正确性
+                for i in range(10):
+                    start_idx = i * 150
+                    end_idx = (i + 1) * 150
+                    self.assertAllClose(large_data[start_idx:end_idx], output_values[i], 
+                                      rtol=1e-5, 
+                                      msg=f"GPU multi-stream: tensor {i} data mismatch")
+
+    @test_util.run_deprecated_v1
+    def testGPUSingleStream(self):
+        """测试GPU单流情况（输出数量<=8）"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session(use_gpu=True):
+            # 创建数据，但输出数量少（<=8），不触发多流
+            np.random.seed(300)
+            data = np.random.rand(800, 256).astype(np.float32)
+            input_tensor = constant_op.constant(data)
+            
+            # 只有6个输出，应该使用单流
+            offsets = constant_op.constant([
+                [0, 150],
+                [150, 150],
+                [300, 150],
+                [450, 150],
+                [600, 100],
+                [700, 100]
+            ], dtype=dtypes.int64)
+            
+            output_tensors = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                input_tensor, offsets)
+            
+            output_values = [tensor.eval() for tensor in output_tensors]
+            
+            # 验证结果正确性
+            self.assertAllClose(data[0:150], output_values[0], rtol=1e-5)
+            self.assertAllClose(data[150:300], output_values[1], rtol=1e-5)
+            self.assertAllClose(data[300:450], output_values[2], rtol=1e-5)
+            self.assertAllClose(data[450:600], output_values[3], rtol=1e-5)
+            self.assertAllClose(data[600:700], output_values[4], rtol=1e-5)
+            self.assertAllClose(data[700:800], output_values[5], rtol=1e-5)
+
+    @test_util.run_deprecated_v1
+    def testCPUGPUConsistency(self):
+        """测试CPU和GPU结果的一致性"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session():
+            # 创建相同的测试数据
+            np.random.seed(400)
+            test_data = np.random.rand(1000, 400).astype(np.float32)
+            input_tensor = constant_op.constant(test_data)
+            
+            offsets = constant_op.constant([
+                [0, 250],
+                [250, 250],
+                [500, 250],
+                [750, 250]
+            ], dtype=dtypes.int64)
+            
+            # CPU执行
+            with tf.device('/CPU:0'):
+                cpu_outputs = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                cpu_values = [tensor.eval() for tensor in cpu_outputs]
+            
+            # GPU执行
+            with tf.device('/GPU:0'):
+                gpu_outputs = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                gpu_values = [tensor.eval() for tensor in gpu_outputs]
+            
+            # 验证CPU和GPU结果一致
+            for i, (cpu_val, gpu_val) in enumerate(zip(cpu_values, gpu_values)):
+                self.assertAllClose(cpu_val, gpu_val, rtol=1e-5, atol=1e-6,
+                                  msg=f"CPU/GPU inconsistency at output {i}")
+
+    @test_util.run_deprecated_v1
+    def testParallelizationWithMixedSizes(self):
+        """测试混合大小输出的并行化"""
+        if not test_util.is_gpu_available(cuda_only=True):
+            self.skipTest("GPU not available")
+        
+        with self.cached_session():
+            # 创建包含大小不一的输出
+            np.random.seed(500)
+            mixed_data = np.random.rand(2500, 400).astype(np.float32)
+            input_tensor = constant_op.constant(mixed_data)
+            
+            # 混合大小：大、小、大、小、大
+            offsets = constant_op.constant([
+                [0, 800],      # 大切片: 800 * 400 = 320,000个元素
+                [800, 50],     # 小切片: 50 * 400 = 20,000个元素
+                [850, 700],    # 大切片: 700 * 400 = 280,000个元素
+                [1550, 100],   # 小切片: 100 * 400 = 40,000个元素
+                [1650, 850]    # 大切片: 850 * 400 = 340,000个元素
+            ], dtype=dtypes.int64)
+            
+            # 在CPU上测试（应该并行化）
+            with tf.device('/CPU:0'):
+                cpu_outputs = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                cpu_values = [tensor.eval() for tensor in cpu_outputs]
+            
+            # 在GPU上测试（使用单流，因为输出<8个）
+            with tf.device('/GPU:0'):
+                gpu_outputs = tensor_split_by_offsets_ops.tensor_split_by_offsets(
+                    input_tensor, offsets)
+                gpu_values = [tensor.eval() for tensor in gpu_outputs]
+            
+            # 验证形状
+            expected_shapes = [(800, 400), (50, 400), (700, 400), (100, 400), (850, 400)]
+            for i, expected_shape in enumerate(expected_shapes):
+                self.assertEqual(expected_shape, cpu_values[i].shape)
+                self.assertEqual(expected_shape, gpu_values[i].shape)
+            
+            # 验证CPU和GPU结果一致
+            for i, (cpu_val, gpu_val) in enumerate(zip(cpu_values, gpu_values)):
+                self.assertAllClose(cpu_val, gpu_val, rtol=1e-5, atol=1e-6,
+                                  msg=f"Mixed sizes: CPU/GPU inconsistency at output {i}")
 
 
 if __name__ == "__main__":

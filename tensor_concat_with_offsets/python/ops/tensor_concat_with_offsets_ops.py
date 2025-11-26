@@ -29,7 +29,7 @@ _tensor_concat_with_offsets_so = tf.load_op_library(
     resource_loader.get_path_to_datafile("_tensor_concat_with_offsets_ops.so"))
 
 
-def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, name=None):
+def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, use_pinned_memory=False, name=None):
     """将多个tensor合并为一个大tensor，并生成内存对齐优化的偏移量数组。
 
     支持多维tensor输入，所有输入tensor必须具有相同的rank，且除第0维外所有维度大小必须相同。
@@ -39,6 +39,8 @@ def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, name=No
         inputs: tensor列表，所有tensor除第0维外其他维度必须相同
         alignment: 内存对齐字节数，默认64字节。仅在use_alignment=True时生效
         use_alignment: 是否启用内存对齐优化，默认True
+        use_pinned_memory: 是否使用pinned memory分配输出，默认False。
+                          当输出需要立即传输到GPU时，使用pinned memory可提升传输速度
         name: 操作名称（可选）
 
     Returns:
@@ -60,6 +62,11 @@ def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, name=No
         merged, offsets = tensor_concat_with_offsets([t1, t2])
         # merged: [[1, 2], [3, 4], [5, 6]]  # shape: [3, 2]
         # offsets: [[0, 2], [2, 1]]
+        
+        # pinned memory示例（用于CPU->GPU传输优化）
+        merged, offsets = tensor_concat_with_offsets([t1, t2], use_pinned_memory=True)
+        with tf.device('/gpu:0'):
+            gpu_tensor = tf.identity(merged)  # 高速传输到GPU
     """
 
     # 输入验证
@@ -86,6 +93,10 @@ def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, name=No
     # 验证use_alignment参数
     if not isinstance(use_alignment, bool):
         raise ValueError(f"use_alignment must be a boolean, got {type(use_alignment)}")
+        
+    # 验证use_pinned_memory参数
+    if not isinstance(use_pinned_memory, bool):
+        raise ValueError(f"use_pinned_memory must be a boolean, got {type(use_pinned_memory)}")
 
     # 检查所有tensor是否至少为1维，并验证维度兼容性
     for i, tensor in enumerate(inputs):
@@ -117,7 +128,7 @@ def tensor_concat_with_offsets(inputs, alignment=64, use_alignment=True, name=No
 
     # 执行算子操作
     return _tensor_concat_with_offsets_so.tensor_concat_with_offsets(
-        inputs, alignment=alignment, use_alignment=use_alignment)
+        inputs, alignment=alignment, use_alignment=use_alignment, use_pinned_memory=use_pinned_memory)
 
 
 @tf.RegisterGradient("TensorConcatWithOffsets")

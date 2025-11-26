@@ -49,6 +49,7 @@ REGISTER_OP("TensorConcatWithOffsets")
     .Attr("T: {float, double, int32, int64}")
     .Attr("alignment: int = 64")         // 默认64字节对齐，适配GPU内存访问模式
     .Attr("use_alignment: bool = true")  // 是否启用内存对齐，默认启用
+    .Attr("use_pinned_memory: bool = false")  // 是否使用pinned memory，默认禁用
 
     .SetShapeFn([](::tensorflow::shape_inference::InferenceContext* c) {
       // 获取输入数量

@@ -21,6 +21,9 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/ops_util.h"
+#include "tensorflow/core/lib/core/threadpool.h"
+
+#include <cstdlib>
 
 namespace tensorflow {
 namespace functor {
@@ -32,17 +35,18 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 using namespace tensor_split_by_offsets_config;
 
 /**
- * CPU设备上的TensorSplitByOffset functor实现
- *
- * 主要特性：
- * 1. 高效的内存复制操作（使用std::memcpy）
- * 2. 完整的边界检查和错误处理
- * 3. 支持多维tensor处理
+ * CPU二级Functor：处理单个输出的拆分操作
+ * 
+ * 与一级Functor的区别：
+ * 1. 处理单个任务，而非批量任务
+ * 2. 不需要context参数
+ * 3. 不涉及并行化逻辑
+ * 
+ * 注意：CPU版本不需要stream参数，因为CPU使用线程池而非流
  */
 template <typename T>
-struct TensorSplitByOffsetsFunctor<CPUDevice, T> {
-  void operator()(const CPUDevice& d,
-                  const T* input_data,
+struct TensorSplitByOffsetsCPUSingleTaskFunctor {
+  void operator()(const T* input_data,
                   int64_t start_row,
                   int64_t row_count,
                   int64_t row_size,
@@ -53,7 +57,7 @@ struct TensorSplitByOffsetsFunctor<CPUDevice, T> {
     }
 
     if (input_data == nullptr || output_data == nullptr) {
-      LOG(ERROR) << "TensorSplitByOffset CPU: Null pointer detected";
+      LOG(ERROR) << "TensorSplitByOffset CPU: Null pointer detected in single task functor";
       return;
     }
 
@@ -68,6 +72,98 @@ struct TensorSplitByOffsetsFunctor<CPUDevice, T> {
 
     // 使用标准库的优化内存复制函数
     std::memcpy(dst, src, copy_size);
+  }
+};
+
+/**
+ * CPU设备上的TensorSplitByOffset functor实现
+ *
+ * 主要特性：
+ * 1. 批量处理多个输出，支持并行化
+ * 2. 使用二级Functor处理单个任务
+ * 3. 环境变量控制并行化行为
+ * 
+ * 参数使用：
+ *   - context: 使用，用于获取线程池进行并行化
+ *   - d: 未使用（仅为统一接口）
+ */
+template <typename T>
+struct TensorSplitByOffsetsFunctor<CPUDevice, T> {
+  void operator()(OpKernelContext* context,
+                  const CPUDevice& d,
+                  const std::vector<SplitTask>& tasks) {
+    if (tasks.empty()) {
+      return;
+    }
+
+    // 检查是否需要并行化
+    const char* threshold_env = std::getenv("TF_SPLIT_PARALLEL_THRESHOLD");
+    const int64_t parallel_threshold = threshold_env ? 
+        std::strtoll(threshold_env, nullptr, 10) : kDefaultParallelThreshold;
+
+    const char* max_parallelism_env = std::getenv("TF_SPLIT_MAX_PARALLELISM");
+    const int max_parallelism = max_parallelism_env ? 
+        std::atoi(max_parallelism_env) : kDefaultMaxParallelism;
+
+    // 计算总数据量
+    int64_t total_elements = 0;
+    for (const auto& task : tasks) {
+      total_elements += task.row_count * task.row_size;
+    }
+
+    const int num_tasks = static_cast<int>(tasks.size());
+
+    // 使用二级Functor处理单个任务
+    TensorSplitByOffsetsCPUSingleTaskFunctor<T> single_task_functor;
+
+    // 如果数据量足够大且任务数量足够多，使用并行处理
+    if (total_elements >= parallel_threshold && num_tasks >= kMinOutputsForParallel) {
+      auto worker_threads = context->device()->tensorflow_cpu_worker_threads();
+      int num_threads = worker_threads->num_threads;
+      
+      if (max_parallelism > 0) {
+        num_threads = std::min(num_threads, max_parallelism);
+      }
+
+      // 并行处理每个任务
+      auto shard_fn = [&](int64_t start_idx, int64_t limit_idx) {
+        for (int64_t idx = start_idx; idx < limit_idx; ++idx) {
+          const SplitTask& task = tasks[idx];
+          
+          // 调用二级Functor处理单个任务
+          single_task_functor(
+              static_cast<const T*>(task.input_data),
+              task.start_row,
+              task.row_count,
+              task.row_size,
+              static_cast<T*>(task.output_data));
+        }
+      };
+
+      // 动态计算 cost_per_unit
+      // 平均每个任务的元素数量，乘以每个元素的估算处理成本
+      // 对于内存复制操作，每个元素的成本约为 10-100 个CPU周期
+      const int64_t avg_elements_per_task = total_elements / num_tasks;
+      const int64_t cost_per_element = 50;  // 每个元素的估算成本
+      const int64_t cost_per_unit = std::max(static_cast<int64_t>(10000), 
+                                               avg_elements_per_task * cost_per_element);
+
+      worker_threads->workers->ParallelFor(
+          num_tasks,
+          cost_per_unit,
+          shard_fn);
+    } else {
+      // 小数据量或任务少，使用单线程处理
+      for (const auto& task : tasks) {
+        // 调用二级Functor处理单个任务
+        single_task_functor(
+            static_cast<const T*>(task.input_data),
+            task.start_row,
+            task.row_count,
+            task.row_size,
+            static_cast<T*>(task.output_data));
+      }
+    }
   }
 };
 
@@ -124,7 +220,11 @@ class TensorSplitByOffsetsOp : public OpKernel {
       row_size *= input_shape.dim_size(dim);
     }
 
-    // 为每个输出分配tensor并设置输出
+    // 收集需要复制数据的任务
+    std::vector<SplitTask> copy_tasks;
+    copy_tasks.reserve(num_outputs);
+
+    // 为每个输出分配tensor，并决定是否需要复制
     for (int i = 0; i < num_outputs; ++i) {
       const int64_t start = offsets_data[i * 2];
       const int64_t length = offsets_data[i * 2 + 1];
@@ -167,15 +267,26 @@ class TensorSplitByOffsetsOp : public OpKernel {
         Tensor sliced_tensor = input_tensor.Slice(start, start + length);
         context->set_output(i, sliced_tensor);
       } else {
-        // 需要复制数据：分配输出tensor并调用functor执行复制
+        // 需要复制数据：分配输出tensor并添加到任务列表
         Tensor* output_tensor = nullptr;
         OP_REQUIRES_OK(context, context->allocate_output(i, output_shape, &output_tensor));
 
-        // 直接调用functor为当前输出执行复制
-        TensorSplitByOffsetsFunctor<Device, T> functor;
-        functor(context->eigen_device<Device>(), input_data, start, length, row_size,
-                output_tensor->flat<T>().data());
+        // 添加到复制任务列表
+        SplitTask task;
+        task.output_index = i;
+        task.input_data = static_cast<const void*>(input_data);
+        task.start_row = start;
+        task.row_count = length;
+        task.row_size = row_size;
+        task.output_data = static_cast<void*>(output_tensor->flat<T>().data());
+        copy_tasks.push_back(task);
       }
+    }
+
+    // 批量执行所有复制任务
+    if (!copy_tasks.empty()) {
+      TensorSplitByOffsetsFunctor<Device, T> functor;
+      functor(context, context->eigen_device<Device>(), copy_tasks);
     }
   }
 
